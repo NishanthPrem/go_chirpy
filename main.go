@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+	// "github.com/lib/pq"
 )
 
 type apiConfig struct {
@@ -38,6 +39,10 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	apiCfg := apiConfig{}
+
+	// dbURL := os.Getenv("DB_URL")
+	// // db, err := sql.Open("postgres", dbURL)
+	// // dbQueries := database.New(db)
 
 	mux := http.NewServeMux()
 	srv := http.Server{
