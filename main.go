@@ -156,6 +156,30 @@ func createChirpHandler(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+func getChirpHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		conn, err := db.Query("SELECT id, created_at, updated_at, body, user_id FROM chirps ORDER BY created_at ASC")
+		if err != nil {
+			log.Printf("Error fetching chirps: %v", err)
+			respondWithError(w, http.StatusInternalServerError, "Could not retrieve chirps")
+			return
+		}
+		defer conn.Close()
+
+		var chirps []Chirp
+		for conn.Next() {
+			var chirp Chirp
+			if err := conn.Scan(&chirp.ID, &chirp.CreatedAt, &chirp.UpdatedAt, &chirp.Body, &chirp.UserID); err != nil {
+				log.Printf("Error scanning chirp: %v", err)
+				respondWithError(w, http.StatusInternalServerError, "Could not retrieve chirp")
+				return
+			}
+			chirps = append(chirps, chirp)
+		}
+		respondWithJSON(w, http.StatusOK, chirps)
+	}
+}
+
 func createUserHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req UserRequest
@@ -222,6 +246,7 @@ func main() {
 
 	// API routes
 	mux.HandleFunc("GET /api/healthz", healthHandler)
+	mux.HandleFunc("GET /api/chirps", getChirpHandler(db))
 	mux.HandleFunc("POST /api/users", createUserHandler(db))
 	mux.HandleFunc("POST /api/chirps", createChirpHandler(db))
 
