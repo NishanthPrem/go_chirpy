@@ -11,13 +11,36 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/NishanthPrem/go_chirpy/internal/database"
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
 	fileServerHits atomic.Int32
+}
+
+type Chirp struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    string    `json:"user_id"`
+}
+
+type ChirpRequest struct {
+	Body   string `json:"body"`
+	UserID string `json:"user_id"`
+}
+
+type User struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+}
+
+type UserRequest struct {
+	Email string `json:"email"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -28,7 +51,7 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 }
 
 func (cfg *apiConfig) metricsHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<!DOCTYPE html>
 <html>
   <body>
@@ -38,9 +61,9 @@ func (cfg *apiConfig) metricsHandler(w http.ResponseWriter, r *http.Request) {
 </html>`, cfg.fileServerHits.Load())
 }
 
-func (cfg *apiConfig) resetHandler(dbQueries *database.Queries) http.HandlerFunc {
+func (cfg *apiConfig) resetHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		err := dbQueries.DeleteAllUsers(r.Context())
+		_, err := db.Exec("DELETE FROM users")
 		if err != nil {
 			log.Printf("Failed to delete users: %s", err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -52,118 +75,177 @@ func (cfg *apiConfig) resetHandler(dbQueries *database.Queries) http.HandlerFunc
 	}
 }
 
+func validateChirp(body string) error {
+	if len(body) > 140 {
+		return fmt.Errorf("chirp is too long")
+	}
+	if len(body) == 0 {
+		return fmt.Errorf("chirp body cannot be empty")
+	}
+	return nil
+}
+
+func cleanChirpBody(body string) string {
+	profaneWords := []string{"kerfuffle", "sharbert", "fornax"}
+	words := strings.Fields(body)
+
+	for i, word := range words {
+		for _, profane := range profaneWords {
+			if strings.ToLower(word) == profane {
+				words[i] = "****"
+				break
+			}
+		}
+	}
+
+	return strings.Join(words, " ")
+}
+
+func saveChirp(db *sql.DB, chirp Chirp) error {
+	_, err := db.Exec(
+		"INSERT INTO chirps (id, created_at, updated_at, body, user_id) VALUES ($1, $2, $3, $4, $5)",
+		chirp.ID,
+		chirp.CreatedAt,
+		chirp.UpdatedAt,
+		chirp.Body,
+		chirp.UserID,
+	)
+	return err
+}
+
+func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(payload)
+}
+
+func respondWithError(w http.ResponseWriter, code int, message string) {
+	respondWithJSON(w, code, map[string]string{"error": message})
+}
+
+func createChirpHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req ChirpRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid request payload")
+			return
+		}
+
+		if err := validateChirp(req.Body); err != nil {
+			respondWithError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		cleanedBody := cleanChirpBody(req.Body)
+
+		chirp := Chirp{
+			ID:        uuid.New().String(),
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
+			Body:      cleanedBody,
+			UserID:    req.UserID,
+		}
+
+		if err := saveChirp(db, chirp); err != nil {
+			log.Printf("Error saving chirp: %v", err)
+			respondWithError(w, http.StatusInternalServerError, "Could not save chirp")
+			return
+		}
+
+		respondWithJSON(w, http.StatusCreated, chirp)
+	}
+}
+
+func createUserHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req UserRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid request payload")
+			return
+		}
+
+		user := User{
+			ID:        uuid.New().String(),
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
+			Email:     req.Email,
+		}
+
+		_, err := db.Exec(
+			"INSERT INTO users (id, created_at, updated_at, email) VALUES ($1, $2, $3, $4)",
+			user.ID,
+			user.CreatedAt,
+			user.UpdatedAt,
+			user.Email,
+		)
+
+		if err != nil {
+			log.Printf("Error creating user: %v", err)
+			respondWithError(w, http.StatusInternalServerError, "Could not create user")
+			return
+		}
+
+		respondWithJSON(w, http.StatusCreated, user)
+	}
+}
+
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
+
 func main() {
 	apiCfg := apiConfig{}
 
 	dbURL := os.Getenv("DB_URL")
+	if dbURL == "" {
+		log.Fatal("DB_URL environment variable is not set")
+	}
+
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
-		log.Fatalf("Failed to connect to database", err)
+		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer db.Close()
-	dbQueries := database.New(db)
+
+	// Test database connection
+	if err := db.Ping(); err != nil {
+		log.Fatalf("Failed to ping database: %v", err)
+	}
 
 	mux := http.NewServeMux()
-	srv := http.Server{
-		Handler: mux,
-		Addr:    ":8080",
-	}
-	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler(dbQueries))
 
-	// Serve the "Welcome to Chirpy" message for /app
-	mux.HandleFunc("/app", apiCfg.middlewareMetricsInc(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Static file server with metrics
+	fileServer := http.FileServer(http.Dir("./assets"))
+	mux.Handle("/app/assets/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/assets/", fileServer)))
+
+	// API routes
+	mux.HandleFunc("GET /api/healthz", healthHandler)
+	mux.HandleFunc("POST /api/users", createUserHandler(db))
+	mux.HandleFunc("POST /api/chirps", createChirpHandler(db))
+
+	// Admin routes
+	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsHandler)
+	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler(db))
+
+	// Welcome route
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Welcome to Chirpy"))
-	})).ServeHTTP)
-	mux.Handle("/app/assets/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/assets/", http.FileServer(http.Dir("./assets")))))
-
-	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsHandler)
-
-	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, req *http.Request) {
-		if req.URL.Path != "/api/healthz" {
-			http.NotFound(w, req)
-			return
-		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
 	})
 
-	mux.HandleFunc("POST /api/validate_chirp", func(w http.ResponseWriter, r *http.Request) {
-		type parameters struct {
-			Body string `json:"body"`
-		}
+	// Start server
+	srv := &http.Server{
+		Addr:         ":8080",
+		Handler:      mux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+	}
 
-		decoder := json.NewDecoder(r.Body)
-		params := parameters{}
-		err := decoder.Decode(&params)
-		if err != nil {
-			log.Printf("Error decoding parameters: %s", err)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Something went wrong"})
-			return
-		}
-		if len(params.Body) > 140 {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Chirp is too long"})
-		}
-
-		profaneWords := []string{"kerfuffle", "sharbert", "fornax"}
-		words := strings.Fields(params.Body)
-
-		for i, word := range words {
-			for _, profane := range profaneWords {
-				if profane == strings.ToLower(word) {
-					words[i] = "****"
-					break
-				}
-			}
-		}
-
-		cleanedBody := strings.Join(words, " ")
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{"cleaned_body": cleanedBody})
-	})
-
-	mux.HandleFunc("POST /api/users", func(w http.ResponseWriter, r *http.Request) {
-		type userRequest struct {
-			Email string `json:"email"`
-		}
-
-		type userRespone struct {
-			ID        string `json:"id"`
-			CreatedAt string `json:"created_at"`
-			UpdatedAt string `json:"updated_at"`
-			Email     string `json:"email"`
-		}
-
-		decoder := json.NewDecoder(r.Body)
-		params := userRequest{}
-		if err := decoder.Decode(&params); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request"})
-			return
-		}
-
-		userID := uuid.New().String()
-		timestamp := time.Now().UTC().Format(time.RFC3339)
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(userRespone{
-			ID:        userID,
-			CreatedAt: timestamp,
-			UpdatedAt: timestamp,
-			Email:     params.Email,
-		})
-
-	})
+	log.Printf("Server starting on :8080")
 	if err := srv.ListenAndServe(); err != nil {
-		fmt.Println("Failed to start server", err)
+		log.Fatalf("Failed to start server: %v", err)
 	}
 }
