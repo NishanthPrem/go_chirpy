@@ -60,6 +60,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database", err)
 	}
+	defer db.Close()
 	dbQueries := database.New(db)
 
 	mux := http.NewServeMux()
