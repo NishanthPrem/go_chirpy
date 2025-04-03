@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
 
@@ -180,6 +181,27 @@ func getChirpHandler(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+func getChirpByIDHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		chirpID := r.PathValue("chirpID")
+		var chirp Chirp
+
+		err := db.QueryRow("SELECT id, created_at, updated_at, body, user_id FROM chirps WHERE id = $1", chirpID).
+			Scan(&chirp.ID, &chirp.CreatedAt, &chirp.UpdatedAt, &chirp.Body, &chirp.UserID)
+
+		if err == sql.ErrNoRows {
+			respondWithError(w, http.StatusNotFound, "Chirp not found")
+			return
+		} else if err != nil {
+			log.Printf("Error fetching chirp: %v", err)
+			respondWithError(w, http.StatusInternalServerError, "Could not retrieve chirp")
+			return
+		}
+
+		respondWithJSON(w, http.StatusOK, chirp)
+	}
+}
+
 func createUserHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req UserRequest
@@ -222,6 +244,10 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	apiCfg := apiConfig{}
 
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
 	dbURL := os.Getenv("DB_URL")
 	if dbURL == "" {
 		log.Fatal("DB_URL environment variable is not set")
@@ -247,6 +273,7 @@ func main() {
 	// API routes
 	mux.HandleFunc("GET /api/healthz", healthHandler)
 	mux.HandleFunc("GET /api/chirps", getChirpHandler(db))
+	mux.HandleFunc("GET /api/chirps/{chirpID}", getChirpByIDHandler(db))
 	mux.HandleFunc("POST /api/users", createUserHandler(db))
 	mux.HandleFunc("POST /api/chirps", createChirpHandler(db))
 
